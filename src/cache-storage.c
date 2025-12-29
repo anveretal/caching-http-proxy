@@ -79,6 +79,7 @@ int cache_storage_put(cache_storage_t *storage, char *req, cache_entry_t *resp) 
                 cache_entry_dereference(current->response);     // удаляем ссылку на старый ответ
                 current->response = resp;                       // заменяем на новый ответ
                 cache_entry_reference(resp);                    // добавлена ссылка на новый ответ
+                time(&current->put_time);
                 log_debug("cache_storage_put: modified node, key '%s'", req);
             }
 
@@ -107,6 +108,8 @@ int cache_storage_put(cache_storage_t *storage, char *req, cache_entry_t *resp) 
 
     new_node->next = storage->map[index];       // добавлем в начало списка
     storage->map[index] = new_node;
+
+    time(&new_node->put_time);
 
     log_debug("cache_storage_put: created new node, key '%s'", req);
     pthread_mutex_unlock(&storage->mutex);
@@ -170,4 +173,41 @@ int cache_storage_remove(cache_storage_t *storage, char *req) {
 
     pthread_mutex_unlock(&storage->mutex);
     return -1;
+}
+
+int cache_storage_clean(cache_storage_t *storage) {
+    if (!storage) return 0;
+    time_t cur_time = time(NULL);
+    int removed_entries = 0;
+
+    pthread_mutex_lock(&storage->mutex);
+
+    for (int i = 0; i < MAP_SIZE; i++) {
+        node_t *current = storage->map[i];
+        node_t* previous = NULL;
+
+        while (current) {
+            node_t *temp = current;
+            current = current->next;
+
+            if (cur_time - temp->put_time >= EXPIRY_TIME) {
+                if (previous) {
+                    previous->next = temp->next;
+                } else {
+                    storage->map[i] = temp->next;
+                }
+
+                /* удаляем ссылку и очищаем ресурсы ноды */
+                cache_entry_dereference(temp->response);
+                free(temp->request);
+                free(temp);
+                removed_entries++;
+            }
+
+            previous = temp;
+        }
+    }
+
+    pthread_mutex_unlock(&storage->mutex);
+    return removed_entries;
 }
