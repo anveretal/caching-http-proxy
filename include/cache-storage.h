@@ -7,7 +7,7 @@
 #include "cache-entry.h"
 
 #define MAP_SIZE            256
-#define EXPIRY_TIME         (60 * 2)
+#define EXPIRY_TIME         (60 * 5)
 
 typedef struct _node {
     char *request;

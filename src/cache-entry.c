@@ -4,13 +4,22 @@
 #include "cache-entry.h"
 #include "logger.h"
 
-#define CHUNK_SIZE          1024
+
 
 cache_entry_t *cache_entry_create() {
     cache_entry_t *entry = calloc(1, sizeof(*entry));
     if (!entry) return NULL;
+
+    entry->first = NULL;
+    entry->last = NULL;
+    atomic_init(&entry->total_size, 0);
+
+    entry->completed = 0;
+    entry->canceled = 0;
+
     entry->ref_cnt = 1;
-    pthread_mutex_init(&entry->mutex, NULL);
+    pthread_mutex_init(&entry->list_mutex, NULL);
+    pthread_mutex_init(&entry->state_mutex, NULL);
     pthread_cond_init(&entry->updated, NULL);
     pthread_spin_init(&entry->ref_cnt_lock, 0);
 
@@ -21,9 +30,16 @@ cache_entry_t *cache_entry_create() {
 
 void cache_entry_destroy(cache_entry_t *entry) {
     if (!entry) return;
-    free(entry->buf);
-    entry->buf = NULL;
-    pthread_mutex_destroy(&entry->mutex);
+
+    cache_block_t *current = entry->first;
+    while (current) {
+        cache_block_t *next = current->next;
+        free(current);
+        current = next;
+    }
+
+    pthread_mutex_destroy(&entry->list_mutex);
+    pthread_mutex_destroy(&entry->state_mutex);
     pthread_cond_destroy(&entry->updated);
     pthread_spin_destroy(&entry->ref_cnt_lock);
 
@@ -31,28 +47,40 @@ void cache_entry_destroy(cache_entry_t *entry) {
     free(entry);
 }
 
+
+
 int cache_entry_append(cache_entry_t *entry, char *new_data, size_t size) {
     if (!entry || !new_data) return 0;
 
-    pthread_mutex_lock(&entry->mutex);
+    size_t remaining = size;
+    size_t offset = 0;
 
-    size_t new_size = entry->size + size;
-    if (entry->capacity < new_size) {
-        size_t new_capacity = new_size + CHUNK_SIZE;
-        char *new_buf = realloc(entry->buf, new_capacity);
-        if (new_buf == NULL) {
-            pthread_mutex_unlock(&entry->mutex);
-            return -1;
+    while(remaining > 0) {
+        size_t to_copy = remaining > BLOCK_SIZE ? BLOCK_SIZE : remaining;
+
+        cache_block_t *new_block = malloc(sizeof(cache_block_t));
+        if (!new_block) return -1;
+
+        memcpy(new_block->data, new_data + offset, to_copy);
+        new_block->used = to_copy;
+        new_block->next = NULL;
+
+        pthread_mutex_lock(&entry->list_mutex);
+        if (entry->last) {
+            entry->last->next = new_block;
+        } else {
+            entry->first = new_block;
         }
-        entry->buf = new_buf;
-        entry->capacity = new_capacity;
+        entry->last = new_block;
+        pthread_mutex_unlock(&entry->list_mutex);
+
+        atomic_fetch_add(&entry->total_size, to_copy);
+
+        remaining -= to_copy;
+        offset += to_copy;
     }
 
-    memcpy(entry->buf + entry->size, new_data, size);
-    entry->size += size;
-
     pthread_cond_broadcast(&entry->updated);
-    pthread_mutex_unlock(&entry->mutex);
 
     return 0;
 }
@@ -61,18 +89,18 @@ int cache_entry_append(cache_entry_t *entry, char *new_data, size_t size) {
 
 void cache_entry_set_completed(cache_entry_t *entry) {
     if (!entry) return;
-    pthread_mutex_lock(&entry->mutex);
+    pthread_mutex_lock(&entry->state_mutex);
     entry->completed = 1;
+    pthread_mutex_unlock(&entry->state_mutex);
     pthread_cond_broadcast(&entry->updated);
-    pthread_mutex_unlock(&entry->mutex);
 }
 
 void cache_entry_set_canceled(cache_entry_t *entry) {
     if (!entry) return;
-    pthread_mutex_lock(&entry->mutex);
+    pthread_mutex_lock(&entry->state_mutex);
     entry->canceled = 1;
+    pthread_mutex_unlock(&entry->state_mutex);
     pthread_cond_broadcast(&entry->updated);
-    pthread_mutex_unlock(&entry->mutex);
 }
 
 

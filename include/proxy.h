@@ -11,6 +11,7 @@
 typedef struct {
     int server_socket;
     int running;
+    int port;
     cache_storage_t *cache;
     thread_pool_t *threadpool;
 
@@ -20,7 +21,7 @@ typedef struct {
     pthread_mutex_t mutex;
 } proxy_t;
 
-proxy_t *proxy_create(cache_storage_t *cache, thread_pool_t *threadpool);
+proxy_t *proxy_create(cache_storage_t *cache, thread_pool_t *threadpool, int port);
 void proxy_destroy(proxy_t *proxy);
 
 int proxy_start(proxy_t *proxy);

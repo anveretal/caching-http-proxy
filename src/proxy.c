@@ -10,19 +10,18 @@
 #include "logger.h"
 #include "proxy.h"
 
-#define PORT            80
 #define BACKLOG         30
 
 
 
-static int create_server_socket();
+static int create_server_socket(int port);
 
 static int create_gc_timer(proxy_t *proxy);
 static void fire_gc_timer(proxy_t *proxy);
 
 
 
-proxy_t *proxy_create(cache_storage_t *cache, thread_pool_t *threadpool) {
+proxy_t *proxy_create(cache_storage_t *cache, thread_pool_t *threadpool, int port) {
     if (!cache) {
         log_error("proxy_create: invalid cache");
         return NULL;
@@ -34,7 +33,8 @@ proxy_t *proxy_create(cache_storage_t *cache, thread_pool_t *threadpool) {
         return NULL;
     }
 
-    proxy->server_socket = create_server_socket();
+    proxy->port = port;
+    proxy->server_socket = create_server_socket(port);
     if (proxy->server_socket == -1) {
         free(proxy);
         return NULL;
@@ -91,7 +91,7 @@ int proxy_start(proxy_t *proxy) {
     int err = listen(proxy->server_socket, BACKLOG);
     if (err) return -1;
 
-    log_info("Proxy started");
+    log_info("Proxy started on port %d", proxy->port);
 
     while (proxy->running) {
         int client_socket = accept(proxy->server_socket, NULL, NULL);
@@ -141,7 +141,7 @@ void garbage_collector_routine(union sigval arg) {
 
 
 
-static int create_server_socket() {
+static int create_server_socket(int port) {
     int server_socket = socket(AF_INET, SOCK_STREAM, 0);
     if (server_socket == -1) {
         log_error("Failed to create server socket, error: %s", strerror(errno));
@@ -155,7 +155,7 @@ static int create_server_socket() {
     memset(&saddr, 0, sizeof(saddr));
     saddr.sin_family = AF_INET;
     saddr.sin_addr.s_addr = INADDR_ANY;
-    saddr.sin_port = htons(PORT);
+    saddr.sin_port = htons(port);
 
     int err = bind(server_socket, (struct sockaddr*) &saddr, sizeof(saddr));
     if (err) {
