@@ -25,7 +25,7 @@ static phr_header_t *find_header(phr_header_t headers[], size_t num_headers, con
 static size_t get_content_len(phr_header_t headers[], size_t num_headers);
 
 static int send_data(int sock, const char *data, size_t len);
-static int send_from_cache(int sock, cache_entry_t *cache);
+static int send_from_cache(int sock, cache_entry_t *entry);
 
 static ssize_t read_and_parse_request(int sock, char *buf, size_t max_len, req_parse_t *parse_data);
 static ssize_t handle_response(int sock_to_server, int sock_to_client, cache_entry_t *cache_entry, int *status);
@@ -274,39 +274,78 @@ static int send_data(int sock, const char *data, size_t len) {
     return 0;
 }
 
-static int send_from_cache(int sock, cache_entry_t *cache) {
+static int send_from_cache(int sock, cache_entry_t *entry) {
     size_t sent_total = 0;
-    size_t len_to_send;
-    int err, ret;
-
-    pthread_mutex_lock(&cache->mutex);
+    cache_block_t *current_block = NULL;
+    size_t block_offset = 0;
 
     while (1) {
-        while (cache->size == sent_total && !cache->completed && !cache->canceled) {
-            pthread_cond_wait(&cache->updated, &cache->mutex);
+        size_t current_size = atomic_load(&entry->total_size);
+        
+        pthread_mutex_lock(&entry->state_mutex);
+        int is_completed = entry->completed;
+        int is_canceled = entry->canceled;
+        pthread_mutex_unlock(&entry->state_mutex);
+        
+        if (is_canceled) {
+            return -1;
         }
-
-        if (cache->canceled) {
-            ret = -1;
-            break;
+        
+        if (sent_total >= current_size) {
+            if (is_completed) return 0;
+            
+            pthread_mutex_lock(&entry->state_mutex);
+            current_size = atomic_load(&entry->total_size);
+            is_completed = entry->completed;
+            is_canceled = entry->canceled;
+            
+            if (is_canceled) {
+                pthread_mutex_unlock(&entry->state_mutex);
+                return -1;
+            }
+            
+            if (sent_total >= current_size && !is_completed) {
+                pthread_cond_wait(&entry->updated, &entry->state_mutex);
+                pthread_mutex_unlock(&entry->state_mutex);
+                continue;
+            }
+            
+            pthread_mutex_unlock(&entry->state_mutex);
+            continue;
         }
-
-        len_to_send = cache->size - sent_total;
-        err = send_data(sock, cache->buf + sent_total, len_to_send);
-        if (err) {
-            ret = -1;
-            break;
+        
+        if (current_block == NULL) {
+            pthread_mutex_lock(&entry->list_mutex);
+            current_block = entry->first;
+            pthread_mutex_unlock(&entry->list_mutex);
+            block_offset = 0;
         }
-        sent_total = cache->size;
-
-        if (cache->completed) {
-            ret = 0;
-            break;
+        
+        while (current_block && sent_total < current_size) {
+            size_t available_in_block = current_block->used - block_offset;
+            size_t to_send = available_in_block;
+            
+            if (sent_total + to_send > current_size) {
+                to_send = current_size - sent_total;
+            }
+            
+            int err = send_data(sock, current_block->data + block_offset, to_send);
+            if (err) {
+                return -1;
+            }
+            
+            sent_total += to_send;
+            block_offset += to_send;
+            
+            if (block_offset >= current_block->used) {
+                cache_block_t *next_block = current_block->next;
+                current_block = next_block;
+                block_offset = 0;
+            }
         }
     }
-
-    pthread_mutex_unlock(&cache->mutex);
-    return ret;
+    
+    return 0;
 }
 
 
